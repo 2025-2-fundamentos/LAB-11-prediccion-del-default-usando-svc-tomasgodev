@@ -95,3 +95,177 @@
 # {'type': 'cm_matrix', 'dataset': 'train', 'true_0': {"predicted_0": 15562, "predicte_1": 666}, 'true_1': {"predicted_0": 3333, "predicted_1": 1444}}
 # {'type': 'cm_matrix', 'dataset': 'test', 'true_0': {"predicted_0": 15562, "predicte_1": 650}, 'true_1': {"predicted_0": 2490, "predicted_1": 1420}}
 #
+
+import pandas as pd
+import os 
+from sklearn.compose import ColumnTransformer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.pipeline import Pipeline
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+from sklearn.feature_selection import SelectKBest, f_classif
+from sklearn.model_selection import GridSearchCV
+from sklearn.svm import SVC
+from sklearn.metrics import (precision_score, balanced_accuracy_score,
+                              recall_score, f1_score)
+from sklearn.metrics import confusion_matrix
+import gzip
+import pickle
+import os
+import json
+
+def cargar_datos():
+
+    df_train=pd.read_csv("files/input/train_data.csv.zip")
+    df_test=pd.read_csv("files/input/test_data.csv.zip")
+    return df_train, df_test
+
+def limpieza(df):
+    df=df.copy()
+    df=df.rename(columns={"default payment next month":"default"})
+    df=df.drop(columns=["ID"], errors="ignore")
+    df=df.dropna()
+    df=df[(df["EDUCATION"]>0) & (df["MARRIAGE"]>0)]
+    df.loc[df["EDUCATION"]>=4, "EDUCATION"]=4
+    
+    return df
+
+def separar_datos(base):
+    base=base.copy()
+    x=base
+    y=base.pop("default")
+    return x,y
+
+def hacer_pipeline(estimador):
+    columnas_categoricas=["SEX","EDUCATION","MARRIAGE"]
+
+    preproceso=ColumnTransformer(
+        transformers=[
+            ("ohe",
+             OneHotEncoder(handle_unknown="ignore"),
+             columnas_categoricas),
+        ],
+        remainder=StandardScaler()
+    )
+
+    seleccion=SelectKBest(score_func=f_classif)
+    pipeline=Pipeline(
+        steps=[
+            ("preproceso",preproceso),
+            ("seleccion",seleccion),
+            ("pca",PCA(n_components=None)),
+            ("estimador",estimador)
+        ]
+    )
+
+    return pipeline
+
+def make_grid_search(estimador, param_grid, cv=10):
+
+    grid_search = GridSearchCV(
+        estimator=estimador,
+        param_grid=param_grid,
+        cv=cv,
+        scoring="balanced_accuracy",
+        n_jobs=-1,
+        verbose=1
+    )
+
+    return grid_search
+
+def train_svm(x_train, y_train, x_test, y_test):
+    svc = SVC(random_state=42)
+
+    pipeline = hacer_pipeline(estimador=svc)
+
+    param_grid = {
+        "pca__n_components":[20,21],
+        "seleccion__k": [12],      
+        "estimador__kernel":["rbf"],
+        "estimador__gamma": [0.099]
+    }
+
+
+    estimador = make_grid_search(
+        estimador=pipeline,
+        param_grid=param_grid,
+        cv=10
+    )
+    estimador.fit(x_train, y_train)
+
+    return estimador
+
+def calculate_metrics(model, X, y, dataset_type):
+
+    y_pred = model.predict(X)
+    
+    return {
+        'type': 'metrics',
+        'dataset': dataset_type,
+        'precision': precision_score(y, y_pred),
+        'balanced_accuracy': balanced_accuracy_score(y, y_pred),
+        'recall': recall_score(y, y_pred),
+        'f1_score': f1_score(y, y_pred)
+    }
+
+def calculate_confusion_matrix(model, X, y, dataset_type):
+    y_pred = model.predict(X)
+    cm = confusion_matrix(y, y_pred)
+    
+    return {
+        'type': 'cm_matrix',
+        'dataset': dataset_type,
+        'true_0': {
+            "predicted_0": int(cm[0,0]), 
+            "predicted_1": int(cm[0,1])
+        },
+        'true_1': {
+            "predicted_0": int(cm[1,0]), 
+            "predicted_1": int(cm[1,1])
+        }
+    }
+
+def guardar_modelo(modelo):
+    carpeta="files/models"
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
+
+    nombre = os.path.join(carpeta, "model.pkl.gz")
+    with gzip.open(nombre, 'wb') as f:
+        pickle.dump(modelo, f)
+
+def guardar_metricas(model, x_train, y_train, x_test, y_test):
+
+    m_train = calculate_metrics(model, x_train, y_train, 'train')
+    m_test  = calculate_metrics(model, x_test, y_test, 'test')
+    
+    cm_train = calculate_confusion_matrix(model, x_train, y_train, 'train')
+    cm_test  = calculate_confusion_matrix(model, x_test, y_test, 'test')
+    
+    resultados = [m_train, m_test, cm_train, cm_test]
+    
+    carpeta = "files/output"
+    if not os.path.exists(carpeta):
+        os.makedirs(carpeta)
+        
+    ruta_archivo = os.path.join(carpeta, "metrics.json")
+    
+    with open(ruta_archivo, "w") as f:
+        for item in resultados:
+            f.write(json.dumps(item) + "\n")
+
+
+
+if __name__ == "__main__":
+    base_train, base_test = cargar_datos()
+
+    base_train = limpieza(base_train)
+    base_test = limpieza(base_test)
+
+    x_train, y_train = separar_datos(base_train)
+    x_test, y_test = separar_datos(base_test)
+
+    estimator = train_svm(x_train, y_train, x_test, y_test)
+
+    guardar_modelo(estimator)
+    guardar_metricas(estimator, x_train, y_train, x_test, y_test)
